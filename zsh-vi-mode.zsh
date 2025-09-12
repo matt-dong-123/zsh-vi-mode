@@ -359,10 +359,14 @@ function zvm_widget_wrapper() {
   local rawfunc=$1;
   local func=$2;
   local called=$3;
-  local -i retval
-  $called || { $rawfunc "${@:4}" }
+  local -i retval=0
+  if ! $called; then
+    $rawfunc "${@:4}"
+    retval=$?
+  fi
   $func "${@:4}"
-  return retval
+  [[ $retval -eq 0 ]] && retval=$?
+  return $retval
 }
 
 # Define widget function
@@ -425,7 +429,7 @@ function zvm_find_bindkey_widget() {
   if $prefix_mode; then
     local pos=0
     local spos=3
-    local prefix_keys=
+    local prefix_keys=$keys
 
     # Get the prefix keys
     if [[ $prefix_keys ]]; then
@@ -1903,7 +1907,7 @@ function zvm_vi_edit_command_line() {
 
   # Reload the content to the BUFFER from the temporary
   # file after editing, and delete the temporary file.
-  BUFFER=$(cat $tmp_file)
+  BUFFER=$(cat "$tmp_file")
   rm "$tmp_file"
 
   # Exit the visual mode
@@ -3144,25 +3148,22 @@ function zvm_postpone_reset_prompt() {
 
 # Reset prompt
 function zvm_reset_prompt() {
-  # Return if postponing is enabled
   if (($ZVM_POSTPONE_RESET_PROMPT >= 0)); then
     ZVM_POSTPONE_RESET_PROMPT=$(($ZVM_POSTPONE_RESET_PROMPT + 1))
     return
   fi
-
-  # Return if reset prompt is disabled
   if [[ $ZVM_RESET_PROMPT_DISABLED == true ]]; then
     return
   fi
-
-  local -i retval
+  local -i retval=0
   if [[ -z "$rawfunc" ]]; then
     zle .reset-prompt -- "$@"
+    retval=$?
   else
     $rawfunc -- "$@"
+    retval=$?
   fi
-
-  return retval
+  return $retval
 }
 
 # Undo action in vi insert mode
@@ -3171,7 +3172,7 @@ function zvm_reset_prompt() {
 #         the beginning of the line.  Previous versions of vim
 #         deleted all characters on the line.
 function zvm_viins_undo() {
-  if [[ $ZVM_VI_INS_LEGACY_UNDO ]]; then
+  if [[ $ZVM_VI_INSERT_MODE_LEGACY_UNDO ]]; then
     zvm_kill_line
   else
     zvm_backward_kill_line
@@ -3218,7 +3219,8 @@ function zvm_cursor_style() {
     case $ZVM_MODE in
       $ZVM_MODE_INSERT) old_style=$ZVM_INSERT_MODE_CURSOR;;
       $ZVM_MODE_NORMAL) old_style=$ZVM_NORMAL_MODE_CURSOR;;
-      $ZVM_MODE_OPPEND) old_style=$ZVM_OPPEND_MODE_CURSOR;;
+      $ZVM_MODE_VISUAL) old_style=$ZVM_VISUAL_MODE_CURSOR;;
+      $ZVM_MODE_VISUAL_LINE) old_style=$ZVM_VISUAL_LINE_MODE_CURSOR;;
     esac
 
     if [[ $old_style =~ '\e\][0-9]+;.+\a' ]]; then
@@ -3559,11 +3561,6 @@ function zvm_init() {
     surrounds+=($s)
   done
 
-  # Append for escaping visual mode
-  if $is_custom_escape_key; then
-    surrounds+=("$ZVM_VI_ESCAPE_BINDKEY")
-  fi
-
   # Surround key bindings
   for s in $surrounds; do
     for c in {a,i}${s}; do
@@ -3653,19 +3650,19 @@ function zvm_system_report() {
   local zsh_frameworks=()
 
   if zvm_exist_command "omz"; then
-    zsh_framworks+=("oh-my-zsh $(omz version)")
+    zsh_frameworks+=("oh-my-zsh $(omz version)")
   fi
 
   if zvm_exist_command "starship"; then
-    zsh_framworks+=("$(starship --version | head -n 1)")
+    zsh_frameworks+=("$(starship --version | head -n 1)")
   fi
 
   if zvm_exist_command "antigen"; then
-    zsh_framworks+=("$(antigen version | head -n 1)")
+    zsh_frameworks+=("$(antigen version | head -n 1)")
   fi
 
   if zvm_exist_command "zplug"; then
-    zsh_framworks+=("zplug $(zplug --version | head -n 1)")
+    zsh_frameworks+=("zplug $(zplug --version | head -n 1)")
   fi
 
   if zvm_exist_command "zinit"; then
@@ -3675,7 +3672,7 @@ function zvm_system_report() {
     local version=$(zinit version \
       | head -n 1 \
       | sed -E $'s/(\033\[[a-zA-Z0-9;]+ ?m)//g')
-    zsh_framworks+=("${version}")
+    zsh_frameworks+=("${version}")
   fi
 
   # Shell
@@ -3689,7 +3686,7 @@ function zvm_system_report() {
   #################
   print - "- Terminal program: ${term_info}"
   print - "- Operating system: ${os_info}"
-  print - "- ZSH framework: ${(j:, :)zsh_framworks}"
+  print - "- ZSH framework: ${(j:, :)zsh_frameworks}"
   print - "- ZSH version: $($shell --version)"
   print - "- ZVM version: $(zvm_version | head -n 1)"
 }
