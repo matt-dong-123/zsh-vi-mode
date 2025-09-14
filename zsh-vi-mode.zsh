@@ -318,6 +318,11 @@ fi
 # Enable the cursor style feature
 : ${ZVM_CURSOR_STYLE_ENABLED:=true}
 
+# Enable system clipboard feature
+: ${ZVM_SYSTEM_CLIPBOARD_ENABLED:=false}
+: ${ZVM_CLIPBOARD_COPY_CMD:=}
+: ${ZVM_CLIPBOARD_PASTE_CMD:=}
+
 # All the extra commands
 commands_array_names=(
   zvm_before_init_commands
@@ -445,6 +450,7 @@ function zvm_find_bindkey_widget() {
     local result=$(bindkey -M ${keymap} -p "$prefix_keys")$'\n'
 
     # Split string to array by newline
+    local i=
     for ((i=$spos;i<$#result;i++)); do
 
       # Save the last whitespace character of the line
@@ -480,6 +486,7 @@ function zvm_find_bindkey_widget() {
     fi
 
     # Escape spaces in key bindings (space -> $ZVM_ESCAPE_SPACE)
+    local i=
     for ((i=$#result;i>=0;i--)); do
 
       # Backward find the first whitespace character
@@ -551,6 +558,7 @@ function zvm_readkeys() {
     if [[ "${keys}" == $'\e' ]]; then
       timeout=$ZVM_ESCAPE_KEYTIMEOUT
       # Check if there is any one custom escape sequence
+      local i=
       for ((i=1; i<=${#result[@]}; i=i+2)); do
         if [[ "${result[$i]}" =~ '^\^\[\[?[A-Z0-9]*~?\^\[' ]]; then
           timeout=$ZVM_KEYTIMEOUT
@@ -640,7 +648,7 @@ function zvm_bindkey() {
 
 # Convert string to hexadecimal
 function zvm_string_to_hex() {
-  local str=
+  local str= i=
   for ((i=1;i<=$#1;i++)); do
     str+=$(printf '%x' "'${1[$i]}")
   done
@@ -649,7 +657,7 @@ function zvm_string_to_hex() {
 
 # Escape non-printed characters
 function zvm_escape_non_printed_characters() {
-  local str=
+  local str= i=
   for ((i=0;i<$#1;i++)); do
     local c=${1:$i:1}
     if [[ "$c" < ' ' ]]; then
@@ -690,6 +698,7 @@ function zvm_backward_kill_region() {
   CUTBUFFER=${BUFFER:$bpos:$((epos-bpos))}
   BUFFER="${BUFFER:0:$bpos}${BUFFER:$epos}"
   CURSOR=$bpos
+  zvm_clipboard_copy_buffer
 }
 
 # Remove all characters between the cursor position and the
@@ -712,6 +721,7 @@ function zvm_kill_line() {
   CUTBUFFER=${BUFFER:$bpos:$((epos-bpos))}$'\n'
   BUFFER="${BUFFER:0:$bpos}${BUFFER:$epos}"
   CURSOR=$bpos
+  zvm_clipboard_copy_buffer
 }
 
 # Remove all characters of the whole line.
@@ -727,6 +737,7 @@ function zvm_kill_whole_line() {
 
   BUFFER="${BUFFER:0:$bpos}${BUFFER:$epos}"
   CURSOR=$cpos
+  zvm_clipboard_copy_buffer
 }
 
 # Exchange the point and mark
@@ -1045,6 +1056,7 @@ function zvm_yank() {
     CUTBUFFER=${CUTBUFFER}$'\n'
   fi
   CURSOR=$bpos MARK=$epos
+  zvm_clipboard_copy_buffer
 }
 
 # Up case of the visual selection
@@ -1070,6 +1082,7 @@ function zvm_vi_opp_case() {
   local ret=($(zvm_selection))
   local bpos=${ret[1]} epos=${ret[2]}
   local content=${BUFFER:$bpos:$((epos-bpos))}
+  local i=
   for ((i=1; i<=$#content; i++)); do
     if [[ ${content[i]} =~ [A-Z] ]]; then
       content[i]=${(L)content[i]}
@@ -1089,6 +1102,7 @@ function zvm_vi_yank() {
 
 # Put cutbuffer after the cursor
 function zvm_vi_put_after() {
+  local count=${NUMERIC:-1}
   local head= foot=
   local content=${CUTBUFFER}
   local offset=1
@@ -1104,23 +1118,30 @@ function zvm_vi_put_after() {
       fi
     done
 
-    # Special handling if cursor at an empty line
-    if zvm_is_empty_line; then
-      head=${BUFFER:0:$pos}
-      foot=${BUFFER:$pos}
-    else
-      head=${BUFFER:0:$pos}
-      foot=${BUFFER:$pos}
+    head=${BUFFER:0:$pos}
+    foot=${BUFFER:$pos}
+
+    # If at end of buffer (no trailing newline), prepend one and drop trailing one
+    if ! zvm_is_empty_line; then
       if [[ $pos == $#BUFFER ]]; then
         content=$'\n'${content:0:-1}
         pos=$pos+1
+        head=${BUFFER:0:$pos}
+        foot=${BUFFER:$pos}
       fi
     fi
 
+    local repeated= i=
+    for ((i=1; i<=count; i++)); do
+      repeated+="$content"
+    done
+
     offset=0
-    BUFFER="${head}${content}${foot}"
+    BUFFER="${head}${repeated}${foot}"
     CURSOR=$pos
   else
+    local char_at_cursor=${BUFFER:$CURSOR:1}
+
     # Special handling if cursor at an empty line
     if zvm_is_empty_line; then
       head="${BUFFER:0:$((CURSOR-1))}"
@@ -1130,17 +1151,23 @@ function zvm_vi_put_after() {
       foot="${BUFFER:$((CURSOR+1))}"
     fi
 
-    BUFFER="${head}${BUFFER:$CURSOR:1}${content}${foot}"
-    CURSOR=$CURSOR+$#content
+    local repeated= i=
+    for ((i=1; i<=count; i++)); do
+      repeated+="$content"
+    done
+
+    BUFFER="${head}${char_at_cursor}${repeated}${foot}"
+    CURSOR=$CURSOR+$#repeated
   fi
 
   # Reresh display and highlight buffer
   zvm_highlight clear
-  zvm_highlight custom $(($#head+$offset)) $(($#head+$#content+$offset))
+  zvm_highlight custom $(($#head+$offset)) $(($#head+$#repeated+$offset))
 }
 
 # Put cutbuffer before the cursor
 function zvm_vi_put_before() {
+  local count=${NUMERIC:-1}
   local head= foot=
   local content=${CUTBUFFER}
 
@@ -1165,19 +1192,30 @@ function zvm_vi_put_before() {
       foot=${BUFFER:$pos}
     fi
 
-    BUFFER="${head}${content}${foot}"
+    local repeated= i=
+    for ((i=1; i<=count; i++)); do
+      repeated+="$content"
+    done
+
+    BUFFER="${head}${repeated}${foot}"
     CURSOR=$pos
   else
     head="${BUFFER:0:$CURSOR}"
     foot="${BUFFER:$((CURSOR+1))}"
-    BUFFER="${head}${content}${BUFFER:$CURSOR:1}${foot}"
-    CURSOR=$CURSOR+$#content
+
+    local repeated= i=
+    for ((i=1; i<=count; i++)); do
+      repeated+="$content"
+    done
+
+    BUFFER="${head}${repeated}${BUFFER:$CURSOR:1}${foot}"
+    CURSOR=$CURSOR+$#repeated
     CURSOR=$((CURSOR-1))
   fi
 
   # Reresh display and highlight buffer
   zvm_highlight clear
-  zvm_highlight custom $#head $(($#head+$#content))
+  zvm_highlight custom $#head $(($#head+$#repeated))
 }
 
 # Replace a selection
@@ -1205,6 +1243,7 @@ function zvm_replace_selection() {
 
   BUFFER="${BUFFER:0:$bpos}${cutbuf}${BUFFER:$epos}"
   CURSOR=$cpos
+  zvm_clipboard_copy_buffer
 }
 
 # Replace characters of the visual selection
@@ -1233,6 +1272,7 @@ function zvm_vi_change() {
 
   BUFFER="${BUFFER:0:$bpos}${BUFFER:$epos}"
   CURSOR=$bpos
+  zvm_clipboard_copy_buffer
 
   # Return when it's repeating mode
   $ZVM_REPEAT_MODE && return
@@ -1276,6 +1316,7 @@ function zvm_vi_change_eol() {
   CUTBUFFER=${BUFFER:$bpos:$((epos-bpos))}
   BUFFER="${BUFFER:0:$bpos}${BUFFER:$epos}"
 
+  zvm_clipboard_copy_buffer
   zvm_reset_repeat_commands $ZVM_MODE c 0 $#CUTBUFFER
   zvm_select_vi_mode $ZVM_MODE_INSERT
 }
@@ -1335,6 +1376,7 @@ function zvm_default_handler() {
           done
           ;;
         *)
+          local i=
           for ((i=0;i<$#keys;i++)) do
             zvm_navigation_handler ${keys:$i:1}
             zvm_highlight
@@ -1683,12 +1725,14 @@ function zvm_range_handler() {
   elif [[ $keys =~ '^[cdy]([1-9][0-9]*)?j$' ]]; then
     # Exit if there is no line below
     count=${match[1]:-1}
+    local i=
     for ((i=$((CURSOR+1)); i<=$#BUFFER; i++)); do
       [[ ${BUFFER[$i]} == $'\n' ]] && navkey='j'
     done
   elif [[ $keys =~ '^[cdy]([1-9][0-9]*)?k$' ]]; then
     # Exit if there is no line above
     count=${match[1]:-1}
+    local i=
     for ((i=$((CURSOR+1)); i>0; i--)); do
       [[ ${BUFFER[$i]} == $'\n' ]] && navkey='k'
     done
@@ -1864,7 +1908,7 @@ function zvm_repeat_command {
   # `i`, and it will cause an infinite loop.
   local init_cursor=$CURSOR
   local last_cursor=$CURSOR
-  local exit_code=0
+  local exit_code=0 c=
   for ((c=0; c<count; c++)); do
     eval $cmd
 
@@ -1958,6 +2002,7 @@ function zvm_move_around_surround() {
   local slen=
   local bpos=-1
   local epos=-1
+  local i= s=
   for ((i=$CURSOR;i>=0;i--)); do
     # Check if it's one of the surrounds
     for s in {\',\",\`,\(,\[,\{,\<}; do
@@ -2154,20 +2199,24 @@ function zvm_change_surround_text_object() {
 
 # Repeat last change
 function zvm_repeat_change() {
+  local times=${NUMERIC:-1}
   ZVM_REPEAT_MODE=true
   ZVM_RESET_PROMPT_DISABLED=true
 
   local cmd=${ZVM_REPEAT_COMMANDS[2]}
 
-  # Handle repeat command
-  case $cmd in
-    [aioAIO]) zvm_repeat_insert;;
-    c) zvm_repeat_vi_change;;
-    [cd]*) zvm_repeat_range_change;;
-    R) zvm_repeat_replace;;
-    r) zvm_repeat_replace_chars;;
-    *) zle vi-repeat-change;;
-  esac
+  # Handle repeat command for the specified number of times
+  local i=
+  for ((i=0; i<$times; i++)); do
+    case $cmd in
+      [aioAIO]) zvm_repeat_insert;;
+      c) zvm_repeat_vi_change;;
+      [cd]*) zvm_repeat_range_change;;
+      R) zvm_repeat_replace;;
+      r) zvm_repeat_replace_chars;;
+      *) zle vi-repeat-change;;
+    esac
+  done
 
   zle redisplay
 
@@ -2201,10 +2250,11 @@ function zvm_repeat_insert() {
   esac
 
   # Insert characters
+  local i=
   for ((i=1; i<=${#cmds[@]}; i++)); do
     cmd="${cmds[$i]}"
 
-    # Hanlde the backspace command
+    # Handle the backspace command
     if [[ $cmd == '' ]]; then
       if (($#LBUFFER > 0)); then
         LBUFFER=${LBUFFER:0:-1}
@@ -2214,7 +2264,7 @@ function zvm_repeat_insert() {
 
     # The length of character should be 1
     if (($#cmd == 1)); then
-      LBUFFER+=$cmd
+      zvm_self_insert "$cmd"
     fi
   done
 }
@@ -2232,6 +2282,7 @@ function zvm_repeat_vi_change() {
   local ncount=${cmds[1]}
   local ccount=${cmds[2]}
   local pos=$CURSOR epos=$CURSOR
+  local i=
 
   # Forward expand the characters to the Nth newline character
   for ((i=0; i<$ncount; i++)); do
@@ -2273,6 +2324,7 @@ function zvm_repeat_replace() {
   local cmds=(${ZVM_REPEAT_COMMANDS[3,-1]})
   local cmd=
   local cursor=$CURSOR
+  local i=
 
   for ((i=1; i<=${#cmds[@]}; i++)); do
     cmd="${cmds[$i]}"
@@ -2312,6 +2364,7 @@ function zvm_repeat_replace_chars() {
   fi
 
   local cursor=$((CURSOR+1))
+  local i=
 
   for ((i=1; i<=${#cmds[@]}; i++)); do
     cmd="${cmds[$i]}"
@@ -2905,6 +2958,7 @@ function zvm_highlight() {
 
     # Remove old region highlight
     local rawhighlight=()
+    local i= j=
     for ((i=1; i<=${#region_highlight[@]}; i++)); do
       local raw=true
       local spl=(${(@s/ /)region_highlight[i]})
@@ -3354,6 +3408,91 @@ function zvm_zle-line-init() {
   esac
 }
 
+# Clipboard support
+function zvm_clipboard_detect() {
+  if [[ -n $ZVM_CLIPBOARD_COPY_CMD && -n $ZVM_CLIPBOARD_PASTE_CMD ]]; then
+    return
+  fi
+  if zvm_exist_command pbcopy && zvm_exist_command pbpaste; then
+    ZVM_CLIPBOARD_COPY_CMD='pbcopy'
+    ZVM_CLIPBOARD_PASTE_CMD='pbpaste'
+    return
+  fi
+  if zvm_exist_command wl-copy && zvm_exist_command wl-paste; then
+    ZVM_CLIPBOARD_COPY_CMD='wl-copy'
+    ZVM_CLIPBOARD_PASTE_CMD='wl-paste -n'
+    return
+  fi
+  if zvm_exist_command xclip; then
+    ZVM_CLIPBOARD_COPY_CMD='xclip -selection clipboard'
+    ZVM_CLIPBOARD_PASTE_CMD='xclip -selection clipboard -o'
+    return
+  fi
+  if zvm_exist_command xsel; then
+    ZVM_CLIPBOARD_COPY_CMD='xsel --clipboard -i'
+    ZVM_CLIPBOARD_PASTE_CMD='xsel --clipboard -o'
+    return
+  fi
+}
+
+# Check if clipboard is available
+function zvm_clipboard_available() {
+  zvm_clipboard_detect
+  if [[ -n $ZVM_CLIPBOARD_COPY_CMD && -n $ZVM_CLIPBOARD_PASTE_CMD ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# Copy CUTBUFFER to system clipboard
+function zvm_clipboard_copy_buffer() {
+  $ZVM_SYSTEM_CLIPBOARD_ENABLED || return
+  zvm_clipboard_available || return
+  print -rn -- "$CUTBUFFER" | eval "$ZVM_CLIPBOARD_COPY_CMD" >/dev/null 2>&1
+}
+
+# Get content from system clipboard
+function zvm_clipboard_get() {
+  zvm_clipboard_available || return
+  eval "$ZVM_CLIPBOARD_PASTE_CMD" 2>/dev/null
+}
+
+# Paste content from system clipboard after cursor
+function zvm_paste_clipboard_after() {
+  local content=$(zvm_clipboard_get)
+  [[ -z $content ]] && return
+  local saved=$CUTBUFFER
+  CUTBUFFER=$content
+  zvm_vi_put_after
+  CUTBUFFER=$saved
+}
+
+# Paste content from system clipboard before cursor
+function zvm_paste_clipboard_before() {
+  local content=$(zvm_clipboard_get)
+  [[ -z $content ]] && return
+  local saved=$CUTBUFFER
+  CUTBUFFER=$content
+  zvm_vi_put_before
+  CUTBUFFER=$saved
+}
+
+# Paste content from system clipboard in visual mode
+function zvm_visual_paste_clipboard() {
+  local content=$(zvm_clipboard_get)
+  if [[ -z $content ]]; then
+    zvm_exit_visual_mode
+    return
+  fi
+  local ret=($(zvm_calc_selection))
+  local bpos=$ret[1] epos=$ret[2]
+  local cpos=$((bpos + $#content - 1))
+  CUTBUFFER=${BUFFER:$bpos:$((epos-bpos))}
+  BUFFER="${BUFFER:0:$bpos}${content}${BUFFER:$epos}"
+  CURSOR=$cpos
+  zvm_exit_visual_mode
+}
+
 # Restore the user default cursor style after prompt finish
 function zvm_zle-line-finish() {
   # When we start a program (e.g. vim, bash, etc.) from the
@@ -3431,6 +3570,9 @@ function zvm_init() {
   zvm_define_widget zvm_vi_edit_command_line
   zvm_define_widget zvm_repeat_change
   zvm_define_widget zvm_switch_keyword
+  zvm_define_widget zvm_paste_clipboard_after
+  zvm_define_widget zvm_paste_clipboard_before
+  zvm_define_widget zvm_visual_paste_clipboard
 
   # Override standard widgets
   zvm_define_widget zle-line-pre-redraw zvm_zle-line-pre-redraw
@@ -3500,6 +3642,11 @@ function zvm_init() {
   zvm_bindkey visual '~' zvm_vi_opp_case
   zvm_bindkey visual 'v' zvm_vi_edit_command_line
   zvm_bindkey vicmd  '.' zvm_repeat_change
+
+  zvm_bindkey vicmd  'gp' zvm_paste_clipboard_after
+  zvm_bindkey vicmd  'gP' zvm_paste_clipboard_before
+  zvm_bindkey visual 'gp' zvm_visual_paste_clipboard
+  zvm_bindkey visual 'gP' zvm_visual_paste_clipboard
 
   zvm_bindkey vicmd '^A' zvm_switch_keyword
   zvm_bindkey vicmd '^X' zvm_switch_keyword
