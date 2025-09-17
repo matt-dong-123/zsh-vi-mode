@@ -182,6 +182,36 @@
 # ZVM_CURSOR_STYLE_ENABLED
 # enable the cursor style feature (default is true)
 #
+# ZVM_SYSTEM_CLIPBOARD_ENABLED
+# enable the system clipboard feature (default is false), if you want to enable
+# it, you should also set the copy and paste commands below:
+#
+# ZVM_CLIPBOARD_COPY_CMD
+# the command for copying text to system clipboard
+#
+# ZVM_CLIPBOARD_PASTE_CMD
+# the command for pasting text from system clipboard
+#
+# For example:
+# - For macOS, you can set it to `pbcopy` and `pbpaste`
+# - For Linux, you can set it to `xclip -selection clipboard` and
+#   `xclip -selection clipboard -o`)
+# - For Wayland, you can also use `wl-copy` and `wl-paste`
+# - For WSL, you can also use `clip.exe`
+#
+# If you don't set these two commands, the plugin will try to detect them
+# automatically for you.
+#
+# ZVM_OPEN_CMD
+# the command for opening URL or file path (e.g. `xdg-open`, `open`, `start`
+# and so on)
+#
+# ZVM_OPEN_URL_CMD
+# the command for opening URL (default is $ZVM_OPEN_CMD)
+#
+# ZVM_OPEN_FILE_CMD
+# the command for opening file path (default is $ZVM_OPEN_CMD)
+#
 
 # Avoid sourcing plugin multiple times
 command -v 'zvm_version' >/dev/null && return
@@ -190,7 +220,7 @@ command -v 'zvm_version' >/dev/null && return
 typeset -gr ZVM_NAME='zsh-vi-mode'
 typeset -gr ZVM_DESCRIPTION='💻 A better and friendly vi(vim) mode plugin for ZSH.'
 typeset -gr ZVM_REPOSITORY='https://github.com/jeffreytse/zsh-vi-mode'
-typeset -gr ZVM_VERSION='0.11.0'
+typeset -gr ZVM_VERSION='0.12.0'
 
 # Plugin initial status
 ZVM_INIT_DONE=false
@@ -257,6 +287,18 @@ ZVM_REPEAT_MODE=false
 ZVM_REPEAT_RESET=false
 ZVM_REPEAT_COMMANDS=($ZVM_MODE_NORMAL i)
 
+# Range handling return values
+ZVM_RANGE_HANDLER_RET_OK=0
+ZVM_RANGE_HANDLER_RET_CONTINUE=1
+ZVM_RANGE_HANDLER_RET_PUSHBACK=2
+ZVM_RANGE_HANDLER_RET_CANCEL=3
+
+# URL regex pattern
+ZVM_URL_SCHEME='^(http(s)?:\/\/.)?(ftp(s)?:\/\/.)?(file:\/\/.)?(www\.)?'
+ZVM_URL_HOST='[-a-zA-Z0-9@:%._\+~#=]{0,255}\.[a-z]{2,6}'
+ZVM_URL_PATH='([-a-zA-Z0-9@:%_\+.~#?&\/=]*)$'
+ZVM_URL_REGEX="${ZVM_URL_SCHEME}${ZVM_URL_HOST}${ZVM_URL_PATH}"
+
 ##########################################
 # Initial all default settings
 
@@ -322,6 +364,11 @@ fi
 : ${ZVM_SYSTEM_CLIPBOARD_ENABLED:=false}
 : ${ZVM_CLIPBOARD_COPY_CMD:=}
 : ${ZVM_CLIPBOARD_PASTE_CMD:=}
+
+# Open URL or file path feature
+: ${ZVM_OPEN_CMD:=}
+: ${ZVM_OPEN_URL_CMD:=${ZVM_OPEN_CMD:-}}
+: ${ZVM_OPEN_FILE_CMD:=${ZVM_OPEN_CMD:-}}
 
 # All the extra commands
 commands_array_names=(
@@ -1354,20 +1401,24 @@ function zvm_default_handler() {
           while :; do
             zvm_range_handler "${keys}${extra_keys}"
             case $? in
-              0) break;;
-              1)
+              $ZVM_RANGE_HANDLER_RET_OK)
+                # The range action is handled successfully and exit
+                break
+                ;;
+              $ZVM_RANGE_HANDLER_RET_CONTINUE)
                 # Continue to ask to provide the action when we're
                 # still in visual mode
                 keys='v'; extra_keys=
                 ;;
-              2)
-                # Pushe the keys onto the input stack of ZLE, it's
+              $ZVM_RANGE_HANDLER_RET_PUSHBACK)
+                # Push the keys onto the input stack of ZLE, it's
                 # handled in zvm_readkeys_handler function
                 zvm_exit_visual_mode false
                 zvm_reset_prompt
                 return
                 ;;
-              3)
+              $ZVM_RANGE_HANDLER_RET_CANCEL)
+                # Exit visual mode and cancel the range action
                 zvm_exit_visual_mode false
                 zvm_reset_prompt
                 break
@@ -1543,6 +1594,14 @@ function zvm_navigation_handler() {
 
     cmd=(zvm_find_and_move_cursor $key $count $forward $skip)
     count=1
+  # Handle G command
+  elif [[ $keys =~ '^([1-9][0-9]*)?G$' ]]; then
+    count=${match[1]:-1}
+    cmd=(CURSOR=$#BUFFER)
+  # Handle gg command
+  elif [[ $keys =~ '^([1-9][0-9]*)?gg$' ]]; then
+    count=${match[1]:-1}
+    cmd=(CURSOR=0)
   else
     count=${keys:0:-1}
     case ${keys: -1} in
@@ -1591,7 +1650,7 @@ function zvm_range_handler() {
   local mode=
   local cmds=($ZVM_MODE)
   local count=1
-  local exit_code=0
+  local exit_code=$ZVM_RANGE_HANDLER_RET_OK
 
   # Enter operator pending mode
   zvm_enter_oppend_mode false
@@ -1618,6 +1677,12 @@ function zvm_range_handler() {
     zvm_update_cursor
     read -k 1 key
     keys="${keys}${key}"
+  elif [[ ${keys} =~ '^.g$' ]]; then
+    # If the 2nd character is `g`, we should also read
+    # one more key for `gg`
+    zvm_update_cursor
+    read -k 1 key
+    keys="${keys}${key}"
   fi
 
   # Exit operator pending mode
@@ -1627,7 +1692,7 @@ function zvm_range_handler() {
   # escape non-printed characters (e.g. ^[)
   if [[ $(zvm_escape_non_printed_characters "$keys") =~
     ${ZVM_VI_OPPEND_ESCAPE_BINDKEY/\^\[/\\^\\[} ]]; then
-    return 1
+    return $ZVM_RANGE_HANDLER_RET_CANCEL
   fi
 
   # Enter visual mode or visual line mode
@@ -1751,6 +1816,13 @@ function zvm_range_handler() {
     count=${match[1]:-1}
     count=$((count-1))
     navkey=${count}l
+  elif [[ $keys =~ '^[cdy]([1-9][0-9]*)?G$' ]]; then
+    count=${match[1]:-1}
+    navkey=G
+  elif [[ $keys =~ '^[cdy]([1-9][0-9]*)?gg$' ]]; then
+    MARK=$((MARK-1))
+    count=${match[1]:-1}
+    navkey=gg
   elif [[ $keys =~ '^.([1-9][0-9]*)?([^0-9]+)$' ]]; then
     count=${match[1]:-1}
     navkey=${match[2]}
@@ -1760,7 +1832,7 @@ function zvm_range_handler() {
 
   # Handle navigation
   case $navkey in
-    '') exit_code=1;;
+    '') exit_code=$ZVM_RANGE_HANDLER_RET_CONTINUE;;
     *[ia]?)
       # At least 1 time
       if [[ -z $count ]]; then
@@ -1780,11 +1852,11 @@ function zvm_range_handler() {
         zvm_repeat_command "$cmd" $count
       elif [[ -n "$(zvm_match_surround "${keys[-1]}")" ]]; then
         ZVM_KEYS="${keys}"
-        exit_code=2
+        exit_code=$ZVM_RANGE_HANDLER_RET_PUSHBACK
       elif [[ "${keys[1]}" == 'v' ]]; then
-        exit_code=1
+        exit_code=$ZVM_RANGE_HANDLER_RET_CONTINUE
       else
-        exit_code=3
+        exit_code=$ZVM_RANGE_HANDLER_RET_CANCEL
       fi
       ;;
     c[eEwW])
@@ -1840,7 +1912,7 @@ function zvm_range_handler() {
       if zvm_navigation_handler "${count}${navkey}"; then
         keys="${keys[1]}${retval}"
       else
-        exit_code=1
+        exit_code=$ZVM_RANGE_HANDLER_RET_CONTINUE
       fi
 
       BUFFER[-1]=''
@@ -1960,6 +2032,106 @@ function zvm_vi_edit_command_line() {
       zvm_exit_visual_mode
       ;;
   esac
+}
+
+# Check if content is valid in URL
+function zvm_is_url() {
+  local content="$1"
+
+  # Check if it starts with a valid scheme
+  if [[ "$content" =~ $ZVM_URL_REGEX ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+# Check if content is a valid path
+function zvm_is_path() {
+  local content="$1"
+
+  # Expand ~ if present
+  if [[ "$content" =~ '^~' ]]; then
+    content="${HOME}${content:1}"
+  fi
+
+  # Check if path exists
+  if [[ -e "$content" ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+# Select a URL or path under the cursor
+function zvm_select_url_or_path() {
+  local cursor=${1:-$CURSOR}
+  local buffer=${2:-$BUFFER}
+  local bpos= epos=
+  local _bpos=0 _epos=$#buffer
+  local content=
+
+  # Find the beginning the current line
+  for ((bpos=$cursor; $bpos>=0; bpos--)); do
+    if [[ "${buffer:$bpos:1}" == $'\n' ]]; then
+      _bpos=$((bpos+1))
+      break
+    fi
+  done
+
+  # Find the end of current line
+  for ((epos=$cursor; $epos<$#buffer; epos++)); do
+    if [[ "${buffer:$epos:1}" == $'\n' ]]; then
+      _epos=$epos
+      break
+    fi
+  done
+
+  # Search for the URL or path
+  for ((bpos=$_bpos; $bpos<=$cursor; bpos++)); do
+    for ((epos=$((_epos-1)); $epos>=$cursor; epos--)); do
+      content=${buffer:$bpos:$((epos-bpos+1))}
+      if zvm_is_url "$content" || zvm_is_path "$content"; then
+        echo $bpos $epos
+        return
+      fi
+    done
+  done
+
+  echo $cursor $cursor
+}
+
+# Open URL or folder under cursor (gx command)
+function zvm_open_under_cursor() {
+  # Get the word under the cursor
+  local ret=($(zvm_select_url_or_path $CURSOR $BUFFER))
+  local bpos=${ret[1]} epos=${ret[2]}
+  local content=${BUFFER:$bpos:$((epos-bpos+1))}
+
+  # Check if it's a valid URL
+  if zvm_is_url "$content"; then
+    # Open URL with default browser
+    if [[ -n $ZVM_OPEN_URL_CMD ]]; then
+      local -a cmd
+      cmd=("${(z)ZVM_OPEN_URL_CMD}")
+      "$cmd[@]" "$content"
+    elif zvm_exist_command "open"; then
+      open "$content"
+    elif zvm_exist_command "xdg-open"; then
+      xdg-open "$content"
+    fi
+  # Check if it's a valid path
+  elif zvm_is_path "$content"; then
+    if [[ -n $ZVM_OPEN_FILE_CMD ]]; then
+      local -a cmd
+      cmd=("${(z)ZVM_OPEN_FILE_CMD}")
+      "$cmd[@]" "$content"
+    elif zvm_exist_command "open"; then
+      open "$content"
+    elif zvm_exist_command "xdg-open"; then
+      xdg-open "$content"
+    fi
+  fi
 }
 
 # Get the substr position in a string
@@ -3078,7 +3250,6 @@ function zvm_insert_bol() {
 function zvm_append_eol() {
   ZVM_INSERT_MODE='A'
   zle vi-end-of-line
-  CURSOR=$((CURSOR+1))
   zvm_select_vi_mode $ZVM_MODE_INSERT
   zvm_reset_repeat_commands $ZVM_MODE_NORMAL $ZVM_INSERT_MODE
 }
@@ -3377,37 +3548,6 @@ function zvm_update_repeat_commands() {
   fi
 }
 
-# Updates editor information when line pre redraw
-function zvm_zle-line-pre-redraw() {
-  # Fix cursor style is not updated in tmux environment, when
-  # there are one more panel in the same window, the program
-  # in other panel could change the cursor shape, we need to
-  # update cursor style when line is redrawing.
-  if [[ -n $TMUX ]]; then
-    zvm_update_cursor
-    # Fix display is not updated in the terminal of IntelliJ IDE.
-    [[ "$TERMINAL_EMULATOR" == "JetBrains-JediTerm" ]] && zle redisplay
-  fi
-  zvm_update_highlight
-  zvm_update_repeat_commands
-}
-
-# Start every prompt in the correct vi mode
-function zvm_zle-line-init() {
-  # Save last mode
-  local mode=${ZVM_MODE:-$ZVM_MODE_INSERT}
-
-  # It's neccessary to set to insert mode when line init
-  # and we don't need to reset prompt.
-  zvm_select_vi_mode $ZVM_MODE_INSERT false
-
-  # Select line init mode and reset prompt
-  case ${ZVM_LINE_INIT_MODE:-$mode} in
-    $ZVM_MODE_INSERT) zvm_select_vi_mode $ZVM_MODE_INSERT;;
-    *) zvm_select_vi_mode $ZVM_MODE_NORMAL;;
-  esac
-}
-
 # Clipboard support
 function zvm_clipboard_detect() {
   if [[ -n $ZVM_CLIPBOARD_COPY_CMD && -n $ZVM_CLIPBOARD_PASTE_CMD ]]; then
@@ -3493,6 +3633,37 @@ function zvm_visual_paste_clipboard() {
   zvm_exit_visual_mode
 }
 
+# Updates editor information when line pre redraw
+function zvm_zle-line-pre-redraw() {
+  # Fix cursor style is not updated in tmux environment, when
+  # there are one more panel in the same window, the program
+  # in other panel could change the cursor shape, we need to
+  # update cursor style when line is redrawing.
+  if [[ -n $TMUX ]]; then
+    zvm_update_cursor
+    # Fix display is not updated in the terminal of IntelliJ IDE.
+    [[ "$TERMINAL_EMULATOR" == "JetBrains-JediTerm" ]] && zle redisplay
+  fi
+  zvm_update_highlight
+  zvm_update_repeat_commands
+}
+
+# Start every prompt in the correct vi mode
+function zvm_zle-line-init() {
+  # Save last mode
+  local mode=${ZVM_MODE:-$ZVM_MODE_INSERT}
+
+  # It's neccessary to set to insert mode when line init
+  # and we don't need to reset prompt.
+  zvm_select_vi_mode $ZVM_MODE_INSERT false
+
+  # Select line init mode and reset prompt
+  case ${ZVM_LINE_INIT_MODE:-$mode} in
+    $ZVM_MODE_INSERT) zvm_select_vi_mode $ZVM_MODE_INSERT;;
+    *) zvm_select_vi_mode $ZVM_MODE_NORMAL;;
+  esac
+}
+
 # Restore the user default cursor style after prompt finish
 function zvm_zle-line-finish() {
   # When we start a program (e.g. vim, bash, etc.) from the
@@ -3574,6 +3745,9 @@ function zvm_init() {
   zvm_define_widget zvm_paste_clipboard_before
   zvm_define_widget zvm_visual_paste_clipboard
 
+  # Open URL under cursor
+  zvm_define_widget zvm_open_under_cursor
+
   # Override standard widgets
   zvm_define_widget zle-line-pre-redraw zvm_zle-line-pre-redraw
 
@@ -3643,11 +3817,16 @@ function zvm_init() {
   zvm_bindkey visual 'v' zvm_vi_edit_command_line
   zvm_bindkey vicmd  '.' zvm_repeat_change
 
+  # Open URL under cursor
+  zvm_bindkey vicmd 'gx' zvm_open_under_cursor
+
+  # Clipboard support
   zvm_bindkey vicmd  'gp' zvm_paste_clipboard_after
   zvm_bindkey vicmd  'gP' zvm_paste_clipboard_before
   zvm_bindkey visual 'gp' zvm_visual_paste_clipboard
   zvm_bindkey visual 'gP' zvm_visual_paste_clipboard
 
+  # Switch keyword
   zvm_bindkey vicmd '^A' zvm_switch_keyword
   zvm_bindkey vicmd '^X' zvm_switch_keyword
 
